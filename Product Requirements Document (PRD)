@@ -1,0 +1,226 @@
+Product Requirements Document (PRD)
+🧭 Product Name
+
+rottyctl (CLI)
+rotty (Web UI)
+
+1. 🎯 Objective
+
+Provide a lightweight, scalable tool to:
+
+Discover and scan storage (NAS + object storage)
+Identify ROT (Redundant, Obsolete, Trivial) data
+Quantify cost impact
+Recommend tiering or deletion actions
+2. 👤 Target Users
+DevOps / Platform Engineers
+Storage & Infrastructure teams
+FinOps / Cloud cost teams
+3. 🧱 Core Features
+3.1 Scanner Engine
+Functional Requirements
+Support:
+S3-compatible storage
+Azure Blob (via Microsoft Azure)
+NAS (NFS / SMB mounts)
+Collect metadata:
+path
+size
+last modified
+last accessed (if available)
+Handle:
+billions of objects (streaming, not in-memory)
+Non-Functional
+Parallel scanning (configurable concurrency)
+Resume interrupted scans
+Incremental scan support (delta mode)
+3.2 ROT Classification Engine
+Rules (configurable)
+Redundant:
+duplicate files (size + hash optional)
+Obsolete:
+last modified > X days
+Trivial:
+size < threshold OR temp/log patterns
+Output
+
+Tagged dataset:
+
+file → {rot_type: obsolete, risk: low}
+3.3 Cost Simulation Engine
+Inputs
+Storage provider pricing
+Data size per class
+Output
+Current cost
+Projected cost (after tiering)
+Savings:
+monthly
+annual
+Providers (initial)
+AWS S3
+Azure Blob
+Generic (user-defined)
+Include:
+storage cost per GB
+retrieval cost
+early deletion penalties
+3.4 Tiering Recommendation Engine
+Actions
+Move to:
+cold storage
+archive tiers
+external vaults (e.g. Veeam Vault)
+Delete (optional)
+Output Example
+/logs/2021 → Archive (low risk, 2y unused)
+/tmp       → Delete (trivial)
+/finance   → Keep (high risk)
+3.5 CLI Interface (Primary)
+Example Commands
+rotctl scan s3://bucket
+rotctl analyze ./scan.json --older-than 90d
+rotctl simulate --tier azure-archive
+rotctl report --format table
+Requirements
+Fast startup
+Pipe-friendly (JSON output)
+Works offline after scan
+3.6 Web UI (Secondary but Important)
+Purpose
+Visual exploration
+Multi-share management
+Reporting for stakeholders
+Features
+Dashboard:
+total storage
+ROT %
+potential savings
+Filters:
+age
+size
+storage class
+Drill-down:
+by bucket/share/path
+Architecture
+Backend API (Go)
+Frontend (React or similar)
+4. ⚙️ System Architecture
+High-Level Components
+[Scanner Workers] → [Metadata Stream] → [Analyzer Engine]
+                                      → [Cost Engine]
+                                      → [Storage DB]
+                                              ↓
+                                   [CLI + Web UI]
+Storage Layer
+
+Options:
+
+SQLite (local runs)
+PostgreSQL (multi-user / UI mode)
+Scaling Strategy (THIS IS CRITICAL)
+1. Streaming, not batch
+Never load full dataset into memory
+Process as a pipeline
+2. Worker Pool Model
+Concurrent scanners:
+per bucket
+per prefix
+
+Tunable:
+
+--workers 32
+3. Use existing tools (smart reuse)
+
+Instead of reinventing scanning:
+
+Integrate with rclone
+Use lsjson
+Or library mode
+
+👉 This alone saves weeks of work.
+
+4. Partitioning Strategy
+
+For large datasets:
+
+Prefix-based scanning:
+
+s3://bucket/a*
+s3://bucket/b*
+Time-based partitioning
+5. Incremental Mode (huge win)
+
+Store:
+
+last scan timestamp
+
+Next run:
+
+only scan changed objects
+5. 📊 Performance Requirements
+Handle:
+100M+ objects
+100+ TB datasets
+Throughput:
+≥ 10k objects/sec (target baseline)
+Memory:
+O(1) relative to dataset size (streaming)
+6. 🔐 Security & Access
+Read-only scanning by default
+No data modification unless explicitly enabled
+Credentials:
+env vars
+config file
+IAM roles
+7. 🧪 Observability
+Logs:
+scan progress
+errors
+Metrics:
+files scanned/sec
+bytes processed
+Optional:
+Prometheus endpoint
+8. 🧩 Extensibility
+
+Plugin-style design for:
+
+storage backends
+cost models
+classification rules
+9. 🚀 MVP Scope (build THIS first)
+
+If you want to avoid overbuilding:
+
+Phase 1 (CLI only)
+Scan (via rclone or SDK)
+Age-based ROT detection
+Simple cost calculator
+JSON + table output
+Phase 2
+Tiering simulation
+Configurable rules
+Phase 3
+Web UI
+Multi-scan aggregation
+⚖️ Key Design Decisions (important)
+1. CLI-first is correct
+Easier adoption
+Scriptable
+DevOps-friendly
+2. Web UI should NOT block MVP
+Add after core engine is solid
+3. Efficiency comes from:
+streaming
+concurrency
+reusing tools like rclone
+💥 Final thought
+
+The real success of this tool won’t be:
+
+“it scans fast”
+
+It’ll be:
+
+“it tells me exactly how much money I’m wasting and what to do about it”

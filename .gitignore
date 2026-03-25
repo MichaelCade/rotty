@@ -1,0 +1,13 @@
+# Binaries
+rottyctl
+
+# Scan outputs
+*.jsonl
+*.json
+
+# OS specific
+.DS_Store
+
+# IDE and tool configs
+.idea/
+.vscode/

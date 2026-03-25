@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mcade/rotty/pkg/analyzer"
+	"github.com/MichaelCade/rotty/pkg/analyzer"
 	"github.com/spf13/cobra"
 )
 

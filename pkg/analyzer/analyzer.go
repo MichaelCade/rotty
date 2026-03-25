@@ -7,7 +7,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/mcade/rotty/pkg/scanner"
+	"github.com/MichaelCade/rotty/pkg/scanner"
 )
 
 type FlagType string

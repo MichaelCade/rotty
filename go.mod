@@ -1,4 +1,4 @@
-module github.com/mcade/rotty
+module github.com/MichaelCade/rotty
 
 go 1.25.1
 

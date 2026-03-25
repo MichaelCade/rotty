@@ -5,7 +5,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/mcade/rotty/pkg/scanner"
+	"github.com/MichaelCade/rotty/pkg/scanner"
 	"github.com/spf13/cobra"
 )
 

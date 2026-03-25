@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/mcade/rotty/pkg/analyzer"
+	"github.com/MichaelCade/rotty/pkg/analyzer"
 )
 
 type Pricing struct {

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/mcade/rotty/pkg/cost"
+	"github.com/MichaelCade/rotty/pkg/cost"
 	"github.com/spf13/cobra"
 )
 

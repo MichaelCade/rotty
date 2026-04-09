@@ -1,98 +1,136 @@
 package scanner
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
+	"mime"
+	"path/filepath"
 	"strings"
 	"time"
+
+	// Register only the three backends described in the PRD.
+	// Additional backends can be added here as needed.
+	_ "github.com/rclone/rclone/backend/azureblob"
+	_ "github.com/rclone/rclone/backend/local"
+	_ "github.com/rclone/rclone/backend/s3"
+	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config/configfile"
+	"github.com/rclone/rclone/fs/walk"
 )
 
-// FileMeta represents metadata for a scanned object from rclone
+// FileMeta represents metadata for a scanned object.
 type FileMeta struct {
-	Path    string    `json:"Path"`
-	Name    string    `json:"Name"`
-	Size    int64     `json:"Size"`
-	MimeType string   `json:"MimeType"`
-	ModTime time.Time `json:"ModTime"`
-	IsDir   bool      `json:"IsDir"`
+	Path     string    `json:"Path"`
+	Name     string    `json:"Name"`
+	Size     int64     `json:"Size"`
+	MimeType string    `json:"MimeType"`
+	ModTime  time.Time `json:"ModTime"`
+	IsDir    bool      `json:"IsDir"`
 }
 
-// CheckDeps ensures rclone is installed
-func CheckDeps() error {
-	_, err := exec.LookPath("rclone")
-	if err != nil {
-		return fmt.Errorf("rclone is required but not found in PATH")
-	}
-	return nil
+// Options configures a scan run.
+type Options struct {
+	// Anon uses anonymous (unauthenticated) access. Useful for public S3 buckets.
+	Anon bool
+	// Workers sets the number of listing threads (passed to rclone). 0 = rclone default.
+	Workers int
+	// Progress is an optional callback invoked after each batch of objects. It
+	// receives the running total of files and bytes scanned so far.
+	Progress func(files, bytes int64)
 }
 
-// Scan initiates an rclone scan of the target, and writes newline-delimited JSON metadata
-// about each file to the output stream. Memory is O(1) as it streams.
-func Scan(target string, anon bool, out io.Writer) error {
-	if err := CheckDeps(); err != nil {
-		return err
-	}
+func init() {
+	// Install a no-op config file handler so rclone works without ~/.config/rclone/rclone.conf.
+	// Credentials are sourced from environment variables and inline remote parameters.
+	configfile.Install()
+}
 
-	// Auto-translate s3:// for out-of-the-box support without config
-	if strings.HasPrefix(target, "s3://") {
+// translateTarget converts common URI shorthand into rclone remote notation.
+//
+//	s3://bucket/prefix   → :s3,provider=AWS,env_auth=true:bucket/prefix
+//	azure://container/p  → :azureblob:container/p
+//	/local/path          → passed through (rclone local backend)
+func translateTarget(target string, anon bool) string {
+	switch {
+	case strings.HasPrefix(target, "s3://"):
+		suffix := strings.TrimPrefix(target, "s3://")
 		if anon {
-			target = strings.Replace(target, "s3://", ":s3,provider=AWS,env_auth=false,anon=true:", 1)
-		} else {
-			target = strings.Replace(target, "s3://", ":s3,provider=AWS,env_auth=true:", 1)
+			return ":s3,provider=AWS,env_auth=false,anon=true:" + suffix
 		}
-	}
+		return ":s3,provider=AWS,env_auth=true:" + suffix
 
-	cmd := exec.Command("rclone", "lsjson", "-R", target)
-	stdout, err := cmd.StdoutPipe()
+	case strings.HasPrefix(target, "azure://"):
+		// Credentials via AZURE_STORAGE_ACCOUNT + AZURE_STORAGE_KEY
+		// or AZURE_STORAGE_CONNECTION_STRING in the environment.
+		return ":azureblob:" + strings.TrimPrefix(target, "azure://")
+	}
+	// Local paths and pre-formatted rclone remotes pass through unchanged.
+	return target
+}
+
+// Scan streams file metadata from target and writes newline-delimited JSON to out.
+// Memory usage is O(1) — objects are streamed from the rclone backend directly.
+// No external rclone binary is required.
+func Scan(target string, opts Options, out io.Writer) error {
+	ctx := context.Background()
+
+	rcloneTarget := translateTarget(target, opts.Anon)
+	f, err := fs.NewFs(ctx, rcloneTarget)
 	if err != nil {
-		return fmt.Errorf("could not create stdout pipe: %w", err)
-	}
-	// Pipe stderr to os.Stderr so the user sees rclone errors directly
-	cmd.Stderr = os.Stderr 
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start rclone: %w", err)
+		return fmt.Errorf("failed to initialise filesystem for %q: %w", target, err)
 	}
 
-	decoder := json.NewDecoder(stdout)
 	encoder := json.NewEncoder(out)
+	var totalFiles, totalBytes int64
 
-	// Expect an array opening bracket
-	t, err := decoder.Token()
-	if err != nil {
-		// rclone might have output nothing if directory is empty or missing, or not JSON.
-		return fmt.Errorf("failed to read opening token from rclone output: %w", err)
-	}
-	if delim, ok := t.(json.Delim); !ok || delim != '[' {
-		return fmt.Errorf("expected JSON array opening bracket, got %v", t)
-	}
-
-	for decoder.More() {
-		var meta FileMeta
-		if err := decoder.Decode(&meta); err != nil {
-			if err == io.EOF {
-				break
+	err = walk.ListR(ctx, f, "", true, -1, walk.ListObjects, func(entries fs.DirEntries) error {
+		for _, entry := range entries {
+			obj, ok := entry.(fs.Object)
+			if !ok {
+				continue
 			}
-			return fmt.Errorf("failed to decode array element: %w", err)
-		}
-		
-		// Write to output stream as NDJSON
-		if err := encoder.Encode(meta); err != nil {
-			return fmt.Errorf("failed to write to output: %w", err)
-		}
-	}
 
-	// Consume the closing bracket
-	if _, err := decoder.Token(); err != nil && err != io.EOF {
-		return fmt.Errorf("failed to read closing token: %w", err)
-	}
+			name := filepath.Base(obj.Remote())
 
-	err = cmd.Wait()
+			// Detect MIME type — prefer backend-reported, fall back to extension.
+			mimeType := ""
+			if mt, ok := obj.(fs.MimeTyper); ok {
+				mimeType = mt.MimeType(ctx)
+			}
+			if mimeType == "" {
+				mimeType = mime.TypeByExtension(filepath.Ext(name))
+			}
+			if mimeType == "" {
+				mimeType = "application/octet-stream"
+			}
+
+			meta := FileMeta{
+				Path:     obj.Remote(),
+				Name:     name,
+				Size:     obj.Size(),
+				MimeType: mimeType,
+				ModTime:  obj.ModTime(ctx),
+				IsDir:    false,
+			}
+
+			if err := encoder.Encode(meta); err != nil {
+				return fmt.Errorf("failed to write metadata: %w", err)
+			}
+
+			totalFiles++
+			totalBytes += meta.Size
+		}
+
+		if opts.Progress != nil {
+			opts.Progress(totalFiles, totalBytes)
+		}
+		return nil
+	})
+
 	if err != nil {
-		return fmt.Errorf("rclone exited with error: %w", err)
+		return fmt.Errorf("scan failed: %w", err)
 	}
 	return nil
 }
